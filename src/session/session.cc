@@ -7520,9 +7520,19 @@ bool Session::StopZenzLiveCorrectionKeepingVisiblePresentation(
   // Capture the visible presentation before
   // CancelPendingZenzLiveCorrection() discards the deferred state. Only a
   // round that continued a previously adopted Zenz correction carries a
-  // continued_input_presentation; a stopped first round has nothing visible
-  // to preserve and keeps the Mozc fallback below.
-  std::optional<PendingLiveConversionPresentation> visible_basis;
+  // continued_input_presentation, and only when the surface on screen
+  // actually diverges from this round's Mozc result is there a Zenz surface
+  // worth preserving; anything else keeps the Mozc fallback below.
+  //
+  // The presentation re-anchored for the next key event must be the stable
+  // continued basis itself, not a basis rebuilt from the visible preedit:
+  // the visible preedit ends in the transient unresolved romaji tail, so a
+  // basis copied from it stops being a prefix of the composition as soon as
+  // the tail resolves, and the next pending display falls back to Mozc.
+  std::optional<PendingLiveConversionPresentation> stable_basis;
+  commands::Preedit visible_preedit;
+  std::string visible_key;
+  std::string visible_value;
   uint32_t visible_generation = 0;
   std::string visible_context_class;
   std::string visible_left_context;
@@ -7530,16 +7540,14 @@ bool Session::StopZenzLiveCorrectionKeepingVisiblePresentation(
       deferred_zenz_live_presentation_->continued_input_presentation
           .has_value() &&
       deferred_zenz_live_presentation_->visible_preedit.segment_size() > 0 &&
-      !deferred_zenz_live_presentation_->visible_value.empty()) {
-    PendingLiveConversionPresentation basis;
-    basis.key = deferred_zenz_live_presentation_->visible_key;
-    basis.raw_preedit =
-        deferred_zenz_live_presentation_->visible_raw_preedit;
-    basis.value = deferred_zenz_live_presentation_->visible_value;
-    basis.preedit_output = deferred_zenz_live_presentation_->visible_preedit;
-    basis.stable_spans = deferred_zenz_live_presentation_
-                             ->continued_input_presentation->stable_spans;
-    visible_basis = std::move(basis);
+      !deferred_zenz_live_presentation_->visible_value.empty() &&
+      deferred_zenz_live_presentation_->visible_value !=
+          live_conversion_value_) {
+    stable_basis =
+        deferred_zenz_live_presentation_->continued_input_presentation;
+    visible_preedit = deferred_zenz_live_presentation_->visible_preedit;
+    visible_key = deferred_zenz_live_presentation_->visible_key;
+    visible_value = deferred_zenz_live_presentation_->visible_value;
     visible_generation = pending_zenz_live_.generation;
     visible_context_class = pending_zenz_live_.context_class;
     visible_left_context = pending_zenz_live_.left_context;
@@ -7547,26 +7555,26 @@ bool Session::StopZenzLiveCorrectionKeepingVisiblePresentation(
 
   CancelPendingZenzLiveCorrection();
   const bool result = OutputCurrentLiveConversionAfterZenzStop(command, debug);
-  if (!result || !visible_basis.has_value()) {
+  if (!result || !stable_basis.has_value()) {
     return result;
   }
 
   // Keep the surface the user is already looking at, and re-anchor it as
   // the visible Zenz correction for the current key, so further typing and
   // commit keep building on it instead of the hidden Mozc result.
-  pending_live_conversion_presentation_ = *visible_basis;
+  pending_live_conversion_presentation_ = *stable_basis;
   zenz_live_visible_generation_ = visible_generation;
-  zenz_live_key_ = visible_basis->key;
-  zenz_live_display_key_ = visible_basis->key;
-  zenz_live_value_ = visible_basis->value;
+  zenz_live_key_ = live_conversion_key_;
+  zenz_live_display_key_ = visible_key;
+  zenz_live_value_ = visible_value;
   zenz_live_mozc_value_ = live_conversion_value_;
   zenz_live_context_class_ = visible_context_class;
   zenz_live_left_context_ = visible_left_context;
-  zenz_live_preedit_output_ = visible_basis->preedit_output;
-  zenz_live_stable_spans_ = visible_basis->stable_spans;
+  zenz_live_preedit_output_ = visible_preedit;
+  zenz_live_stable_spans_ = stable_basis->stable_spans;
 
   commands::Output* output = command->mutable_output();
-  *output->mutable_preedit() = visible_basis->preedit_output;
+  *output->mutable_preedit() = visible_preedit;
   output->set_live_conversion(true);
   output->set_live_conversion_pending(false);
   output->set_zenz_live_correction_pending(false);
