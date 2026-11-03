@@ -8690,6 +8690,104 @@ TEST_F(SessionTest,
 }
 
 TEST_F(SessionTest,
+       DeferredZenzFailedContinuationKeepsVisibleZenzSurface) {
+  MockEngine engine;
+  std::shared_ptr<MockConverter> converter = CreateEngineConverterMock(&engine);
+
+  Session session(engine);
+  SessionTestPeer session_peer(session);
+  InitSessionToPrecomposition(&session);
+
+  config::Config config;
+  config::ConfigHandler::GetDefaultConfig(&config);
+  config.set_use_live_conversion(true);
+  config.set_live_conversion_delay_msec(0);
+  config.set_live_conversion_min_key_length(4);
+  config.set_use_zenz_live_correction(true);
+  config.set_defer_live_conversion_display_until_zenz_result(true);
+  config.set_zenz_live_correction_delay_msec(1000);
+  config.set_zenz_live_correction_min_key_length(2);
+  config.set_use_zenz_synthetic_candidate(true);
+  session.SetConfig(config);
+
+  Segments base_segments;
+  Segment* base = base_segments.add_segment();
+  base->set_key("さすがで");
+  AddCandidate("さすがで", "流石で", base);
+
+  Segments unresolved_segments;
+  Segment* unresolved = unresolved_segments.add_segment();
+  unresolved->set_key("さすがでs");
+  AddCandidate("さすがでs", "流石でｓ", unresolved);
+
+  Segments resolved_segments;
+  Segment* resolved = resolved_segments.add_segment();
+  resolved->set_key("さすがです");
+  AddCandidate("さすがです", "流石です", resolved);
+
+  {
+    ::testing::InSequence sequence;
+    EXPECT_CALL(*converter, StartConversion(_, _))
+        .WillOnce(DoAll(SetArgPointee<1>(base_segments), Return(true)));
+    EXPECT_CALL(*converter, StartConversion(_, _))
+        .WillOnce(DoAll(SetArgPointee<1>(unresolved_segments), Return(true)));
+    EXPECT_CALL(*converter, StartConversion(_, _))
+        .WillOnce(DoAll(SetArgPointee<1>(resolved_segments), Return(true)));
+  }
+
+  commands::Command command;
+  InsertCharacterString("さすがで", "abcd", &session, &command);
+  ASSERT_TRUE(command.output().zenz_live_correction_pending());
+  EXPECT_PREEDIT("さすがで", command);
+
+  ZenzLiveResponse base_response;
+  base_response.ok = true;
+  base_response.value = "さすがで";
+
+  command.Clear();
+  ASSERT_TRUE(
+      session_peer.ApplyZenzLiveCorrectionResult(base_response, &command));
+  ASSERT_TRUE(command.output().zenz_live_correction_applied());
+  EXPECT_PREEDIT("さすがで", command);
+
+  // Continue typing. While the next Zenz round is pending, the interim
+  // display extends the visible Zenz surface.
+  command.Clear();
+  ASSERT_TRUE(SendKey("s", &session, &command));
+  EXPECT_PREEDIT("さすがでｓ", command);
+  ASSERT_TRUE(command.output().zenz_live_correction_pending());
+
+  // The continuation round fails. The visible Zenz surface must survive
+  // instead of being replaced wholesale by the new Mozc result.
+  ZenzLiveResponse failed_response;
+  failed_response.ok = false;
+
+  command.Clear();
+  ASSERT_TRUE(
+      session_peer.ApplyZenzLiveCorrectionResult(failed_response, &command));
+  EXPECT_PREEDIT("さすがでｓ", command);
+  EXPECT_FALSE(command.output().zenz_live_correction_pending());
+
+  // Typing on must keep building on the visible Zenz surface, not fall back
+  // to the hidden Mozc conversion.
+  command.Clear();
+  ASSERT_TRUE(SendKey("u", &session, &command));
+  EXPECT_PREEDIT("さすがです", command);
+  ASSERT_TRUE(command.output().zenz_live_correction_pending());
+
+  // A later successful round still replaces the display normally.
+  ZenzLiveResponse resolved_response;
+  resolved_response.ok = true;
+  resolved_response.value = "さすがです";
+
+  command.Clear();
+  ASSERT_TRUE(session_peer.ApplyZenzLiveCorrectionResult(resolved_response,
+                                                         &command));
+  ASSERT_TRUE(command.output().zenz_live_correction_applied());
+  EXPECT_PREEDIT("さすがです", command);
+}
+
+TEST_F(SessionTest,
        DeferredZenzPendingUnresolvedRomajiResolvesWithoutMozcFlash) {
   MockEngine engine;
   std::shared_ptr<MockConverter> converter = CreateEngineConverterMock(&engine);
