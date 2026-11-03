@@ -818,6 +818,14 @@ class Session {
   bool OutputCurrentLiveConversionAfterZenzStop(
       mozc::commands::Command* command,
       absl::string_view debug);
+  // Stops the pending Zenz round (cancelling it and producing the usual
+  // after-stop output), but when the stopped round was continuing an
+  // already-visible Zenz correction, keeps that visible surface as the final
+  // display and re-anchors it as the visible correction for the current key,
+  // instead of replacing it wholesale with the new Mozc result.
+  bool StopZenzLiveCorrectionKeepingVisiblePresentation(
+      mozc::commands::Command* command,
+      absl::string_view debug);
   ZenzLiveCorrector* EnsureZenzLiveCorrector();
   bool ApplyZenzLiveCorrectionResult(
       const ZenzLiveResponse& response,

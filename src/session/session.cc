@@ -7515,6 +7515,65 @@ bool Session::OutputCurrentLiveConversionAfterZenzStop(
   return true;
 }
 
+bool Session::StopZenzLiveCorrectionKeepingVisiblePresentation(
+    commands::Command* command, absl::string_view debug) {
+  // Capture the visible presentation before
+  // CancelPendingZenzLiveCorrection() discards the deferred state. Only a
+  // round that continued a previously adopted Zenz correction carries a
+  // continued_input_presentation; a stopped first round has nothing visible
+  // to preserve and keeps the Mozc fallback below.
+  std::optional<PendingLiveConversionPresentation> visible_basis;
+  uint32_t visible_generation = 0;
+  std::string visible_context_class;
+  std::string visible_left_context;
+  if (HasDeferredZenzLivePresentation() &&
+      deferred_zenz_live_presentation_->continued_input_presentation
+          .has_value() &&
+      deferred_zenz_live_presentation_->visible_preedit.segment_size() > 0 &&
+      !deferred_zenz_live_presentation_->visible_value.empty()) {
+    PendingLiveConversionPresentation basis;
+    basis.key = deferred_zenz_live_presentation_->visible_key;
+    basis.raw_preedit =
+        deferred_zenz_live_presentation_->visible_raw_preedit;
+    basis.value = deferred_zenz_live_presentation_->visible_value;
+    basis.preedit_output = deferred_zenz_live_presentation_->visible_preedit;
+    basis.stable_spans = deferred_zenz_live_presentation_
+                             ->continued_input_presentation->stable_spans;
+    visible_basis = std::move(basis);
+    visible_generation = pending_zenz_live_.generation;
+    visible_context_class = pending_zenz_live_.context_class;
+    visible_left_context = pending_zenz_live_.left_context;
+  }
+
+  CancelPendingZenzLiveCorrection();
+  const bool result = OutputCurrentLiveConversionAfterZenzStop(command, debug);
+  if (!result || !visible_basis.has_value()) {
+    return result;
+  }
+
+  // Keep the surface the user is already looking at, and re-anchor it as
+  // the visible Zenz correction for the current key, so further typing and
+  // commit keep building on it instead of the hidden Mozc result.
+  pending_live_conversion_presentation_ = *visible_basis;
+  zenz_live_visible_generation_ = visible_generation;
+  zenz_live_key_ = visible_basis->key;
+  zenz_live_display_key_ = visible_basis->key;
+  zenz_live_value_ = visible_basis->value;
+  zenz_live_mozc_value_ = live_conversion_value_;
+  zenz_live_context_class_ = visible_context_class;
+  zenz_live_left_context_ = visible_left_context;
+  zenz_live_preedit_output_ = visible_basis->preedit_output;
+  zenz_live_stable_spans_ = visible_basis->stable_spans;
+
+  commands::Output* output = command->mutable_output();
+  *output->mutable_preedit() = visible_basis->preedit_output;
+  output->set_live_conversion(true);
+  output->set_live_conversion_pending(false);
+  output->set_zenz_live_correction_pending(false);
+  output->set_zenz_live_correction_applied(false);
+  return true;
+}
+
 ZenzLiveCorrector* Session::EnsureZenzLiveCorrector() {
   if (zenz_live_corrector_ == nullptr) {
     zenz_live_corrector_ =
@@ -7600,8 +7659,7 @@ bool Session::AdvancePendingZenzLiveCorrection(
 
   if (zenz_live_corrector_ == nullptr) {
     ZenzDebugOutput("[zenz] async corrector missing");
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
         command, "zenz_async_corrector_missing");
   }
 
@@ -7618,8 +7676,7 @@ bool Session::AdvancePendingZenzLiveCorrection(
                                     pending_zenz_live_.mozc_value),
         " context_class=", pending_zenz_live_.context_class));
 
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
         command, "zenz_deferred_presentation_timeout");
   }
 
@@ -7666,8 +7723,8 @@ bool Session::AdvancePendingZenzLiveCorrection(
                                     pending_zenz_live_.mozc_value),
         " context_class=", pending_zenz_live_.context_class));
 
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(command, reason);
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
+        command, reason);
   }
 
   ZenzDebugOutput(absl::StrCat(
@@ -7692,8 +7749,8 @@ bool Session::ApplyZenzLiveCorrectionResult(
             ? "zenz_response_not_ok"
             : ZenzSafeDebugReason(response.debug);
 
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(command, debug);
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
+        command, debug);
   }
 
   // Do not erase a matching left-context prefix blindly: it can be part of
@@ -7705,8 +7762,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
           pending_zenz_live_.mozc_value);
   if (!prefix.safe) {
     ZenzDebugOutput("[zenz] ambiguous left_context prefix; fallback to Mozc");
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
         command, "ambiguous_left_context_prefix");
   }
   std::string zenz_value = prefix.value;
@@ -7722,8 +7778,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
     // otherwise delete or duplicate the surrogate, so fail closed.
     constexpr absl::string_view kProxySurface = "木村";
     if (CountSurfaceOccurrences(zenz_value, kProxySurface) != 1) {
-      CancelPendingZenzLiveCorrection();
-      return OutputCurrentLiveConversionAfterZenzStop(
+      return StopZenzLiveCorrectionKeepingVisiblePresentation(
           command, "natural_name_proxy_missing_or_ambiguous");
     }
     const size_t proxy_offset = zenz_value.find(kProxySurface);
@@ -7732,8 +7787,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
     for (absl::string_view honorific : {"さん", "さま", "様", "ちゃん",
                                        "くん", "君", "氏"}) {
       if (absl::StartsWith(after_proxy, honorific)) {
-        CancelPendingZenzLiveCorrection();
-        return OutputCurrentLiveConversionAfterZenzStop(
+        return StopZenzLiveCorrectionKeepingVisiblePresentation(
             command, "natural_name_proxy_unrequested_honorific");
       }
     }
@@ -7803,8 +7857,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
                                     pending_zenz_live_.mozc_value),
         " context_class=", context_class));
 
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
         command, validation.reason);
   }
 
@@ -7861,8 +7914,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
                                     pending_zenz_live_.mozc_value),
         " context_class=", context_class));
 
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
         command, adoption.reason);
   }
 
@@ -7880,8 +7932,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
         " context_class=", context_class,
         " adoption=", adoption.reason));
 
-    CancelPendingZenzLiveCorrection();
-    return OutputCurrentLiveConversionAfterZenzStop(
+    return StopZenzLiveCorrectionKeepingVisiblePresentation(
         command, "same_as_mozc_after_adoption");
   }
 
@@ -7908,8 +7959,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
           "[zenz] strict reading rejected reason=", reading_validation.reason,
           " ", ZenzRedactedTextStats("value", zenz_value),
           " context_class=", context_class));
-      CancelPendingZenzLiveCorrection();
-      return OutputCurrentLiveConversionAfterZenzStop(
+      return StopZenzLiveCorrectionKeepingVisiblePresentation(
           command, reading_validation.reason);
     }
   }
@@ -7966,8 +8016,7 @@ bool Session::ApplyZenzLiveCorrectionResult(
             "auto_block_shadow_compare", true);
       }
 
-      CancelPendingZenzLiveCorrection();
-      return OutputCurrentLiveConversionAfterZenzStop(
+      return StopZenzLiveCorrectionKeepingVisiblePresentation(
           command, feedback_decision.reason);
     }
   }
